@@ -5,14 +5,15 @@ import os
 
 # Test variants - matching your rms_norm VARIANTS
 VARIANTS = [
+    {'BLOCK_SIZE': 1024, 'EPS': 1e-5},
+    {'BLOCK_SIZE': 2048, 'EPS': 1e-5},
+    {'BLOCK_SIZE': 4096, 'EPS': 1e-5},
+    {'BLOCK_SIZE': 8192, 'EPS': 1e-5},
     {'BLOCK_SIZE': 1024, 'EPS': 1e-6},
     {'BLOCK_SIZE': 2048, 'EPS': 1e-6},
     {'BLOCK_SIZE': 4096, 'EPS': 1e-6},
     {'BLOCK_SIZE': 8192, 'EPS': 1e-6},
-    {'BLOCK_SIZE': 1024, 'EPS': 1e-5},
-    {'BLOCK_SIZE': 2048, 'EPS': 1e-5},
 ]
-
 
 @pytest.fixture(scope="module")
 def runtime_and_device():
@@ -21,10 +22,9 @@ def runtime_and_device():
     dev = rt.get_devices()[0]
     return rt, dev
 
-
 @pytest.mark.parametrize("variant", VARIANTS, ids=lambda v: f"BLOCK_{v['BLOCK_SIZE']}_EPS_{v['EPS']}")
-def test_rms_norm(runtime_and_device, variant):
-    """Test RMS norm kernel with different block sizes and epsilon values"""
+def test_rms_norm_fp32(runtime_and_device, variant):
+    """Test RMS norm kernel with FP32 (for backward compatibility)"""
     rt, dev = runtime_and_device
     
     BLOCK_SIZE = variant['BLOCK_SIZE']
@@ -38,7 +38,7 @@ def test_rms_norm(runtime_and_device, variant):
     if BLOCK_SIZE < hidden_size:
         pytest.skip(f"BLOCK_SIZE {BLOCK_SIZE} < hidden_size {hidden_size}")
     
-    # Create test data on CPU
+    # Create test data in FP32
     x = torch.randn((batch_size, hidden_size), dtype=torch.float32)
     weight = torch.ones(hidden_size, dtype=torch.float32)
     output = torch.zeros((batch_size, hidden_size), dtype=torch.float32)
@@ -48,8 +48,7 @@ def test_rms_norm(runtime_and_device, variant):
     nb_weight = dev.create_buffer(weight)
     nb_output = dev.create_buffer(output)
     
-    # Kernel name format: rms_norm_BLOCK_SIZE_1024_EPS_1e-06
-    # Use str() to get Python's default string representation
+    # Kernel name format
     eps_str = str(EPS).replace('-', '_')
     kernel_name = f'rms_norm_BLOCK_SIZE_{BLOCK_SIZE}_EPS_{eps_str}'
     lib_path = f"ptx_kernels/{kernel_name}.ptx"
@@ -67,30 +66,29 @@ def test_rms_norm(runtime_and_device, variant):
     sched = dev.create_schedule()
     cmd = sched.create_command(kern)
     
-    # Set arguments: x_ptr, output_ptr, weight_ptr, n_elements
+    # Set arguments
     cmd.set_arg(0, nb_x)
     cmd.set_arg(1, nb_output)
     cmd.set_arg(2, nb_weight)
     cmd.set_arg(3, hidden_size)
     cmd.set_arg(4, 0)  # metadata pointer
     
-    # Grid: one block per row
     grid_size = batch_size
     
-    print(f"\nTesting RMS norm BLOCK_SIZE={BLOCK_SIZE}, EPS={EPS}")
+    print(f"\nTesting RMS norm (FP32) BLOCK_SIZE={BLOCK_SIZE}, EPS={EPS}")
     print(f"Grid: [{grid_size}, 1, 1], Block: [128, 1, 1]")
     print(f"Batch: {batch_size}, Hidden: {hidden_size}")
-    print(f"Kernel name: {kernel_name}")
+    print(f"Data type: {x.dtype}")
     
     cmd.finalize([grid_size, 1, 1], [128, 1, 1])
     
     # Run kernel
     sched.run()
     
-    # Copy result back to CPU
+    # Copy result back
     nb_output.copy(output)
     
-    # Verify results using PyTorch
+    # Verify results
     x_squared = x * x
     mean_x_squared = torch.mean(x_squared, dim=-1, keepdim=True)
     rms = torch.sqrt(mean_x_squared + EPS)
@@ -100,11 +98,14 @@ def test_rms_norm(runtime_and_device, variant):
     print(f"Expected[0,0]: {expected[0, 0]}")
     
     max_diff = torch.max(torch.abs(output - expected)).item()
-    print(f"Max difference: {max_diff}")
+    print(f"Max difference: {max_diff:.6e}")
     
-    assert torch.allclose(output, expected, rtol=1e-3, atol=1e-4), \
+    # Tight tolerance for FP32
+    assert torch.allclose(output, expected, rtol=1e-4, atol=1e-5), \
         f"Mismatch for BLOCK_SIZE={BLOCK_SIZE}, EPS={EPS}.\n" \
-        f"Max diff: {max_diff}"
+        f"Max diff: {max_diff:.6e}"
+    
+    print("✅ PASSED")
 
 
 if __name__ == "__main__":
